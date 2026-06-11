@@ -16,10 +16,14 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      title: 'GDM CMake Manager',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
       home: Scaffold(
         body: Row(
           children: [
-            // 왼쪽 영역
+            // Left Panel Area
             Expanded(
               flex: 3,
               child: Padding(
@@ -28,7 +32,7 @@ class MyApp extends StatelessWidget {
               ),
             ),
 
-            // 오른쪽 영역
+            // Right Panel Area
             Container(
               width: 250,
               color: Colors.grey[100],
@@ -62,10 +66,9 @@ class LeftPanel extends StatefulWidget {
 }
 
 class _LeftPanelState extends State<LeftPanel> {
-
-  //변수 
-  bool enableOpenGL = true;
-  bool autoLink = true;
+  // Variables (OpenGL and AutoLink are now permanently enabled inside the logic)
+  final bool enableOpenGL = true;
+  final bool autoLink = true;
   bool cleanBuild = false;
   bool isLoading = false;
 
@@ -80,26 +83,57 @@ class _LeftPanelState extends State<LeftPanel> {
 
   String selectedGenerator = "Visual Studio 17 2022";
   List<String> generatorOptions = ["Visual Studio 17 2022", "Visual Studio 16 2019", "Ninja"];
-  // 라이브러리 목록을 가져오는 함수
+
+  // 수정된 라이브러리 실시간 탐지 함수
   List<String> getCachedLibraries() {
     final projectName = projectNameController.text.trim();
     final sourcePath = sourceController.text.trim();
+    final buildPath = buildController.text.trim();
     
     if (projectName.isEmpty || sourcePath.isEmpty) return [];
 
+    // 중복 제거를 위해 Set 사용
+    final Set<String> detectedLibraries = {};
     final projectRoot = _getProjectRoot();
-    final extPath = p.join(projectRoot, 'external', 'gdm', 'external');
-    
-    final dir = Directory(extPath);
-    if (dir.existsSync()) {
-      return dir.listSync()
-          .whereType<Directory>()
-          .map((e) => p.basename(e.path))
-          .toList();
-    }
-    return [];
-  }
 
+    // 1. 소스 폴더 내 고정 external 경로 탐색 (glutil 등 감지)
+    final extPath = p.join(projectRoot, 'external', 'gdm', 'external');
+    final extDir = Directory(extPath);
+    if (extDir.existsSync()) {
+      for (var entity in extDir.listSync().whereType<Directory>()) {
+        detectedLibraries.add(p.basename(entity.path));
+      }
+    }
+
+    // 2. 빌드 폴더 내 CMake 의존성 다운로드 경로 탐색 (glfw, glad, glm 등 감지)
+    if (buildPath.isNotEmpty) {
+      // CMake FetchContent가 일반적으로 사용하는 경로 (_deps)
+      final depsPath = p.join(buildPath, '_deps');
+      final depsDir = Directory(depsPath);
+      if (depsDir.existsSync()) {
+        for (var entity in depsDir.listSync().whereType<Directory>()) {
+          String name = p.basename(entity.path);
+          // -src, -build, -subbuild 등으로 끝나는 접미사를 정리하여 깔끔하게 이름만 추출
+          name = name.replaceAll(RegExp(r'-(src|build|subbuild)$'), '');
+          detectedLibraries.add(name);
+        }
+      }
+      
+      // 혹시 다른 세부 하위 경로에 생성되는 경우 추가 체크
+      final gdmDepsPath = p.join(buildPath, '_gdm_deps');
+      final gdmDepsDir = Directory(gdmDepsPath);
+      if (gdmDepsDir.existsSync()) {
+        for (var entity in gdmDepsDir.listSync().whereType<Directory>()) {
+          String name = p.basename(entity.path);
+          name = name.replaceAll(RegExp(r'-(src|build|subbuild)$'), '');
+          detectedLibraries.add(name);
+        }
+      }
+    }
+
+    return detectedLibraries.toList();
+  }
+  
   static const String openGLTemplate = r'''
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -120,7 +154,7 @@ int main() {
 
     glfwMakeContextCurrent(window);
 
-    // GLAD2 방식
+    // GLAD2 Method
     int version = gladLoadGL(glfwGetProcAddress);
     if (version == 0) {
         std::cout << "Failed to initialize GLAD" << std::endl;
@@ -143,50 +177,61 @@ int main() {
 }
 ''';
 
-  // 빌드 폴더를 완전히 비우는 함수
+  // Clear the build folder completely
   Future<void> _performClean(String buildPath) async {
     final dir = Directory(buildPath);
     if (await dir.exists()) {
-      addLog("Clean Build 활성화: 기존 빌드 데이터를 삭제합니다...");
+      addLog("Clean Build enabled: Deleting existing build data...");
       try {
-        //디렉토리 삭제
         await dir.delete(recursive: true);
-        
-        //삭제 후 즉시 다시 생성
         await dir.create(recursive: true);
-        
-        addLog("성공: 빌드 폴더가 완전히 초기화되었습니다.");
+        addLog("Success: Build folder has been completely initialized.");
       } catch (e) {
-        // 윈도우 파일 잠금 에러 등에 대한 안내
-        addLog("에러: 빌드 폴더를 삭제할 수 없습니다. 실행 중인 프로그램을 종료하거나 폴더를 사용하는 창을 닫아주세요.", isError: true);
+        addLog("Error: Cannot delete build folder. Please close any programs or windows using this folder.", isError: true);
       }
     } else {
-      // 폴더가 없으면 그냥 새로 생성
       await dir.create(recursive: true);
     }
   }
 
-  //소스 디렉토리 선택
+  // Common validation logic for build paths
+  bool _validateInputs() {
+    final projectName = projectNameController.text.trim();
+    final sourcePath = sourceController.text.trim();
+    final buildPath = buildController.text.trim();
+
+    if (projectName.isEmpty || sourcePath.isEmpty || buildPath.isEmpty) {
+      addLog("Error: Missing required fields. Please fill in Project Name, Source Directory, and Build Directory.", isError: true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please fill in all required fields before proceeding."),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return false;
+    }
+    return true;
+  }
+
+  // Pick source directory
   Future<void> pickSourceFolder() async {
     String? path = await FilePicker.platform.getDirectoryPath();
 
-    if (path != null)   {
+    if (path != null) {
       setState(() {
         sourceController.text = path;
-        
-
         
         if (projectNameController.text.isEmpty || projectNameController.text == "NewProject") {
           projectNameController.text = p.basename(path);
         }
         
-        // 빌드 경로는  /build로 자동 설정
+        // Auto-set build directory to /build
         buildController.text = p.join(path, 'build');
       });
     }
   }
 
-  //빌드 디렉토리 선택
+  // Pick build directory
   Future<void> pickBuildFolder() async {
     String? path = await FilePicker.platform.getDirectoryPath();
 
@@ -197,18 +242,14 @@ int main() {
     }
   }
 
-  // 프로젝트 생성 함수 
+  // Configure Project (Create Project Structure)
   Future<void> createProject() async {
+    if (!_validateInputs()) return;
+
     setState(() => isLoading = true);
-    try{
+    try {
       final projectName = projectNameController.text.trim();
       final sourcePath = sourceController.text.trim();
-      final buildPath = buildController.text.trim();
-
-      if (projectName.isEmpty || sourcePath.isEmpty || buildPath.isEmpty) {
-        addLog("Error: 모든 값을 입력하세요.");
-        return;
-      }
 
       String projectRoot;
       if (p.basename(sourcePath) == projectName) {
@@ -225,113 +266,112 @@ int main() {
         bool isNewProject = true;
         if (await projectDir.exists()) {
           final files = projectDir.listSync();
-          // .cpp 파일이나 기존 CMakeLists.txt가 있으면 기존 프로젝트로 간주 
           if (files.any((file) => file.path.endsWith('.cpp') || file.path.contains('CMakeLists.txt'))) {
             isNewProject = false;
-            addLog("기존 프로젝트 감지: 환경 설정 및 의존성을 업데이트합니다.");
+            addLog("Existing project detected: Updating environment and dependencies.");
           }
         } else {
           await projectDir.create(recursive: true);
-          addLog("새 프로젝트 폴더를 생성했습니다.");
+          addLog("Created a new project folder.");
         }
 
-        // 기본 구조 생성
+        // Generate base structure
         final srcDir = Directory(p.join(projectRoot, 'src'));
         final extDir = Directory(p.join(projectRoot, 'external'));
         if (!await srcDir.exists()) await srcDir.create();
         if (!await extDir.exists()) await extDir.create();
 
-        addLog("GDM 라이브러리 통합 관리자 확인 중...");
+        addLog("Checking GDM Library Integrated Manager...");
         final gdmDir = Directory(p.join(extDir.path, 'gdm'));
 
         if (!await gdmDir.exists()) {
-          addLog("GDM 라이브러리를 최적화하여 다운로드 중...");
+          addLog("Downloading optimized GDM library...");
 
+          // Fixed to pull from the default branch (master/main)
           var result = await Process.run('git', [
             'clone',
-            '-b', 'gdm',
             '--single-branch',
-            '--depth', '1', // 최신 커밋 하나만 가져오기
+            '--depth', '1',
             'https://github.com/awidesky/gdm.git',
             gdmDir.path
           ]);
 
           if (result.exitCode != 0) {
-            addLog("Git Clone 실패: ${result.stderr}");
+            addLog("Git Clone failed: ${result.stderr}", isError: true);
             return;
           }
 
-          // 다운로드 완료 후 .git 폴더 삭제
           final dotGitDir = Directory(p.join(gdmDir.path, '.git'));
           if (await dotGitDir.exists()) {
             await dotGitDir.delete(recursive: true);
-            addLog("GDM 최적화 완료 (.git 히스토리 제거됨)");
+            addLog("GDM optimization completed (.git history removed).");
           }
         }
 
-        //main.cpp 생성
+        // Generate main.cpp
         final mainCpp = File(p.join(srcDir.path, 'main.cpp'));
         if (isNewProject || !await mainCpp.exists()) {
-          addLog("기본 템플릿 소스를 생성합니다.");
+          addLog("Generating default template source.");
           await mainCpp.writeAsString(r'''
-  #include <iostream>
-  int main() {
-      std::cout << "Hello OpenGL Project!" << std::endl;
-      return 0;
-  }
-  ''');
+#include <iostream>
+int main() {
+    std::cout << "Hello OpenGL Project!" << std::endl;
+    return 0;
+}
+''');
         }
 
-      // CMakeLists.txt 생성
-      String cmakeContent = '''
-  cmake_minimum_required(VERSION 3.10)
-  project($projectName)
+        // Generate CMakeLists.txt
+        String cmakeContent = '''
+cmake_minimum_required(VERSION 3.10)
+project($projectName)
 
-  set(CMAKE_CXX_STANDARD 17)
-  add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
-  ''';
+set(CMAKE_CXX_STANDARD 17)
+add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
+''';
 
-      if (enableOpenGL) {
-        cmakeContent += '\n# OpenGL 관련 라이브러리 추가\n';
-        cmakeContent += 'add_subdirectory(external/gdm)\n';
-        cmakeContent += 'include_directories(external/gdm/include)\n';
-      }
+        if (enableOpenGL) {
+          cmakeContent += '\n# Add OpenGL related libraries\n';
+          cmakeContent += 'add_subdirectory(external/gdm)\n';
+          cmakeContent += 'include_directories(external/gdm/include)\n';
+        }
 
-      cmakeContent += '''
-  if (MSVC)
-      add_compile_options(/utf-8 /Zc:__cplusplus)
-  endif()
+        cmakeContent += '''
+if (MSVC)
+    add_compile_options(/utf-8 /Zc:__cplusplus)
+endif()
 
-  file(GLOB SOURCES "src/*.cpp")
-  add_executable($projectName \${SOURCES})
-  ''';
+file(GLOB SOURCES "src/*.cpp")
+add_executable($projectName \${SOURCES})
+''';
 
-      //Auto Link Libraries 체크박스까지 켜져 있을 때만 링크 수행
-      if (enableOpenGL && autoLink) {
-        cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm glfw)\n';
-      }
+        if (enableOpenGL && autoLink) {
+          cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm glfw)\n';
+        }
 
-      addLog("CMakeLists.txt 구성 중...");
-      final cmakeFile = File(p.join(projectRoot, 'CMakeLists.txt'));
-      await cmakeFile.writeAsString(cmakeContent.trim());
+        addLog("Configuring CMakeLists.txt...");
+        final cmakeFile = File(p.join(projectRoot, 'CMakeLists.txt'));
+        await cmakeFile.writeAsString(cmakeContent.trim());
       } catch (e) {
-        addLog("오류 발생: $e");
+        addLog("An error occurred: $e", isError: true);
       }
 
-      addLog("프로젝트 구성이 완료되었습니다. 이제 Generate와 Build를 진행하세요.");
+      addLog("Project configuration completed. You can now proceed to Generate and Build.");
     } finally {
       setState(() => isLoading = false);
     }
   }
 
-  //로그 추가 함수
+  // Add Log function
   void addLog(String message, {bool isError = false}) {
     bool errorFlag = isError;
 
     if (!errorFlag) {
       String lowerMsg = message.toLowerCase();
   
-      bool hasErrorKeyword = lowerMsg.contains("error") || lowerMsg.contains("failed");
+      bool hasErrorKeyword = lowerMsg.contains("error:") || 
+                            lowerMsg.contains(": error") || 
+                            lowerMsg.contains("failed:");
     
       bool isCmakeCheck = lowerMsg.contains("-- performing test") || 
                           lowerMsg.contains("-- looking for");
@@ -345,7 +385,6 @@ int main() {
       logs.add(LogEntry(message, isError: errorFlag));
     });
     
-    // 자동 스크롤 로직
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
         _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
@@ -353,42 +392,16 @@ int main() {
     });
   }
 
-
-  //CMake 실행 함수
-  Future<void> runCMake(String projectPath, String buildPath) async {
-    try {
-      addLog("CMake 실행 시작");
-
-      var result1 = await Process.run(
-        'cmake',
-        ['-S', projectPath, '-B', buildPath],
-      );
-
-      addLog(result1.stdout);
-      addLog(result1.stderr);
-
-      var result2 = await Process.run(
-        'cmake',
-        ['--build', buildPath, '--config', 'Debug'],
-      );
-
-      addLog(result2.stdout);
-      addLog(result2.stderr);
-
-      addLog("빌드 완료!");
-    } catch (e) {
-      addLog("에러 발생: $e");
-    }
-  }
-
-  // 프로젝트 실행
+  // Run Project
   Future<void> runProject() async {
+    if (!_validateInputs()) return;
+
     final projectName = projectNameController.text.trim();
     final buildPath = buildController.text.trim();
     String exePath = p.join(buildPath, selectedConfig, '$projectName.exe');
 
     if (await File(exePath).exists()) {
-      addLog("--- 실행 시도: $exePath ---");
+      addLog("--- Attempting to run: $exePath ---");
       try {
         final process = await Process.start(
           exePath,
@@ -399,49 +412,45 @@ int main() {
           addLog(data.trim());
         });
         process.stderr.transform(utf8.decoder).listen((data) {
-          addLog("[ERROR] ${data.trim()}");
+          addLog("[ERROR] ${data.trim()}", isError: true);
         });
-        // 프로세스 종료 감지
         process.exitCode.then((code) {
-          addLog("--- 프로세스 종료 (Exit Code: $code) ---");
+          addLog("--- Process terminated (Exit Code: $code) ---");
         });
-
       } catch (e) {
-        addLog("실행 중 심각한 오류 발생: $e");
+        addLog("Critical error during execution: $e", isError: true);
       }
     } else {
-      addLog("에러: $selectedConfig 모드로 빌드된 실행 파일을 찾을 수 없습니다.", isError: true);
+      addLog("Error: Could not find the executable built in $selectedConfig mode.", isError: true);
     }
   }
 
-  //CMake Generate 함수
+  // CMake Generate Function
   Future<void> runCMakeGenerate() async { 
+    if (!_validateInputs()) return;
+
     setState(() => isLoading = true);
-    try{
-      final sourcePath = sourceController.text.trim();
+    try {
       final buildPath = buildController.text.trim();
 
-      if (buildPath.isEmpty) return;
-
       if (cleanBuild) {
-          await _performClean(buildPath);
-        } else {
-          final cacheFile = File(p.join(buildPath, 'CMakeCache.txt'));
-          if (await cacheFile.exists()) {
-            await cacheFile.delete();
-            addLog("기존 CMake 캐시를 삭제했습니다.");
-          }
+        await _performClean(buildPath);
+      } else {
+        final cacheFile = File(p.join(buildPath, 'CMakeCache.txt'));
+        if (await cacheFile.exists()) {
+          await cacheFile.delete();
+          addLog("Deleted existing CMake cache.");
         }
+      }
       final projectRoot = _getProjectRoot();
 
-      //기존 CMamke 캐시 삭제
       final cacheFile = File(p.join(buildPath, 'CMakeCache.txt'));
       if (await cacheFile.exists()) {
-        addLog("기존 CMake 캐시를 삭제하고 재구성합니다...");
+        addLog("Deleting and reconstructing existing CMake cache...");
         await cacheFile.delete();
       }
       
-      addLog("CMake 구성을 시작합니다... (Generator: $selectedGenerator)");
+      addLog("Starting CMake configuration... (Generator: $selectedGenerator)");
       
       try {
         final result = await Process.run('cmake', [
@@ -450,43 +459,43 @@ int main() {
           '-B', buildPath
         ]);
 
-        addLog(result.stdout);
+        if (result.stdout.toString().isNotEmpty) addLog(result.stdout);
         
         if (result.exitCode != 0) {
-          addLog("에러: ${result.stderr}");
+          addLog("Error: ${result.stderr}", isError: true);
         } else {
-          addLog("CMake 구성(Generate) 완료!");
+          addLog("CMake configuration (Generate) completed successfully!");
         }
       } catch (e) {
-        addLog("에러 발생: $e", isError: true);
+        addLog("Error occurred: $e", isError: true);
       }
-    }finally{
+    } finally {
       setState(() => isLoading = false);
     }
   }
 
-  //CMake Build 전용 함수
+  // CMake Build Function
   Future<void> runCMakeBuild() async {
+    if (!_validateInputs()) return;
+
     setState(() => isLoading = true);
-    try{
+    try {
       final projectName = projectNameController.text.trim();
       final projectRoot = _getProjectRoot();
       final buildPath = buildController.text.trim();
       
-      if (buildPath.isEmpty) return;
-
-      addLog("빌드를 시작합니다... (Mode: $selectedConfig)");
+      addLog("Starting build... (Mode: $selectedConfig)");
       final result = await Process.run('cmake', ['--build', buildPath, '--config', selectedConfig]);
-      addLog(result.stdout);
+      if (result.stdout.toString().isNotEmpty) addLog(result.stdout);
 
       if (result.exitCode == 0) {
-        addLog("빌드 성공! 의존성 파일(DLL) 확인 중...");
+        addLog("Build successful! Checking dependency files (DLLs)...");
         await _deployDependencies(projectRoot, buildPath, projectName);
-        addLog("빌드 및 환경 구성 완료!");
+        addLog("Build and environment configuration completed!");
       } else {
-        addLog("빌드 실패: ${result.stderr}");
+        addLog("Build failed: ${result.stderr}", isError: true);
       }
-    }finally {
+    } finally {
       setState(() => isLoading = false);
     }
   }
@@ -506,7 +515,6 @@ int main() {
     final targetDir = Directory(p.join(buildPath, 'Debug'));
     if (!await targetDir.exists()) return;
 
-    
     final List<String> dllSources = [
       p.join(buildPath, '_deps', 'glfw3-build', 'src', 'Debug', 'glfw3.dll'),
       p.join(buildPath, 'external', 'gdm', 'external', 'glfw3-3.4.0', 'src', 'Debug', 'glfw3.dll'),
@@ -517,36 +525,37 @@ int main() {
       if (await sourceFile.exists()) {
         final fileName = p.basename(sourcePath);
         await sourceFile.copy(p.join(targetDir.path, fileName));
-        addLog("의존성 복사 완료: $fileName");
+        addLog("Dependency copied: $fileName");
       }
     }
   }
 
-  //빌드 폴더 열기 기능
+  // Open Build Folder Function
   Future<void> openBuildFolder() async {
-    final buildPath = buildController.text.trim();
-    if (buildPath.isEmpty) return;
+    if (!_validateInputs()) return;
 
+    final buildPath = buildController.text.trim();
     if (await Directory(buildPath).exists()) {
       await Process.run('explorer.exe', [buildPath]);
     } else {
-      addLog("에러: 빌드 폴더가 존재하지 않습니다.");
+      addLog("Error: Build folder does not exist.", isError: true);
     }
   }
 
   Future<void> applyOpenGLPreset() async {
+    if (!_validateInputs()) return;
+
     final projectRoot = _getProjectRoot();
     final mainCpp = File(p.join(projectRoot, 'src', 'main.cpp'));
 
-    //확인 팝업
     bool? confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text("프리셋 적용"),
-        content: const Text("기존 main.cpp의 내용이 OpenGL 템플릿으로 교체됩니다. 계속하시겠습니까?"),
+        title: const Text("Apply Preset"),
+        content: const Text("The content of main.cpp will be replaced with the OpenGL template. Do you want to continue?"),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("취소")),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("적용")),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("Apply")),
         ],
       ),
     );
@@ -555,20 +564,36 @@ int main() {
       try {
         if (!await mainCpp.parent.exists()) await mainCpp.parent.create(recursive: true);
         await mainCpp.writeAsString(openGLTemplate);
-        addLog("성공: OpenGL 기본 템플릿이 적용되었습니다. 다시 Build 해주세요.");
+        addLog("Success: Default OpenGL template applied. Please rebuild the project.");
       } catch (e) {
-        addLog("에러: 프리셋 적용 중 오류 발생 - $e");
+        addLog("Error: Failed to apply template - $e", isError: true);
       }
     }
   }
 
-  //테이블 생성
   List<DataRow> _buildLibraryRows() {
-    return getCachedLibraries().map((lib) {
+    final libs = getCachedLibraries();
+    if (libs.isEmpty) {
+      return [
+        const DataRow(cells: [
+          DataCell(Text("No libraries detected", style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic))),
+          DataCell(Text("-")),
+          DataCell(Icon(Icons.help_outline, color: Colors.grey, size: 18)),
+        ])
+      ];
+    }
+
+    return libs.map((lib) {
       List<String> parts = lib.split('-');
-      String name = parts[0];
-      // 버전 정보가 없으면 'Internal' 혹은 'Unknown'으로 표시
-      String version = parts.length > 1 ? parts[1] : "Internal";
+      String name = parts[0].toUpperCase(); 
+      
+      String version = "Detected";
+      if (parts.length > 1) {
+        version = parts.sublist(1).join('-');
+      } else if (name == "GLAD") {
+        version = "2.0"; 
+      }
+      
       return DataRow(cells: [
         DataCell(Text(name, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey))),
         DataCell(Text(version)),
@@ -579,13 +604,12 @@ int main() {
     }).toList();
   }
 
-  //위젯
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 1. 프로젝트 정보 입력 영역 (Card로 그룹화)
+        // 1. Project Info
         _buildSectionTitle("Project Information"),
         Card(
           elevation: 0,
@@ -609,10 +633,10 @@ int main() {
         ),
         const SizedBox(height: 20),
 
-        // 2. 빌드 옵션 설정 영역 (Wrap으로 가독성 개선)
+        // 2. Build Configuration
         _buildSectionTitle("Build Configuration"),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
             border: Border.all(color: Colors.grey[300]!),
             borderRadius: BorderRadius.circular(8),
@@ -622,9 +646,7 @@ int main() {
             runSpacing: 5,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              _buildCheckbox("Enable OpenGL", enableOpenGL, "OpenGL 및 관련 라이브러리 활성화 여부를 결정합니다.", (v) => setState(() => enableOpenGL = v!)),
-              _buildCheckbox("Auto Link", autoLink, "CMake에서 라이브러리를 자동으로 실행 파일에 연결합니다.", (v) => setState(() => autoLink = v!)),
-              _buildCheckbox("Clean Build", cleanBuild, "기존 빌드 캐시를 완전히 삭제하고 새로 구성합니다.", (v) => setState(() => cleanBuild = v!)),
+              _buildCheckbox("Clean Build", cleanBuild, "Completely delete the existing build cache and rebuild.", (v) => setState(() => cleanBuild = v!)),
               const SizedBox(width: 10, child: VerticalDivider()),
               _buildCustomDropdown(selectedConfig, configOptions, (v) => setState(() => selectedConfig = v!)),
               _buildCustomDropdown(selectedGenerator, generatorOptions, (v) => setState(() => selectedGenerator = v!), isSmall: true),
@@ -633,7 +655,7 @@ int main() {
         ),
         const SizedBox(height: 20),
 
-        // 3. Detected Libraries 테이블 (상단 고정 제목 추가)
+        // 3. Detected Libraries
         _buildSectionTitle("Detected Libraries"),
         Expanded(
           flex: 2,
@@ -665,8 +687,7 @@ int main() {
         ),
         const SizedBox(height: 20),
 
-        // build 함수 내 로그 영역 수정
-        // build 함수 내 로그 영역 (기존 코드 655라인 부근 대체)
+        // 4. Output Log
         _buildSectionTitle("Output Log"),
         Expanded(
           flex: 3,
@@ -676,15 +697,14 @@ int main() {
               color: const Color(0xFF1E1E1E),
               borderRadius: BorderRadius.circular(8),
             ),
-            // Padding을 추가하여 스크롤바와 텍스트 사이의 간격을 확보합니다.
             child: Padding(
               padding: const EdgeInsets.only(right: 4.0), 
-              child: RawScrollbar( // Scrollbar보다 제어가 쉬운 RawScrollbar 사용 권장
+              child: RawScrollbar(
                 controller: _scrollController,
-                thumbColor: Colors.grey[600], // 스크롤바 색상 명시
+                thumbColor: Colors.grey[600],
                 radius: const Radius.circular(8),
                 thickness: 8,
-                thumbVisibility: true, // 항상 스크롤바 표시
+                thumbVisibility: true,
                 child: SelectionArea(
                   child: ListView.builder(
                     controller: _scrollController,
@@ -695,7 +715,7 @@ int main() {
                         padding: const EdgeInsets.symmetric(vertical: 1),
                         child: Text(
                           logs[index].message,
-                          style: TextStyle( // logs[index].isError 조건 반영
+                          style: TextStyle(
                             color: logs[index].isError ? Colors.redAccent : Colors.greenAccent,
                             fontFamily: 'Consolas',
                             fontSize: 12,
@@ -727,7 +747,6 @@ int main() {
     );
   }
 
-  // 텍스트 입력 필드
   Widget _buildInputField(String label, TextEditingController controller) {
     return TextField(
       controller: controller,
@@ -741,7 +760,6 @@ int main() {
     );
   }
 
-  // 경로 선택 필드
   Widget _buildPathField(String label, TextEditingController controller, VoidCallback onBrowse) {
     return Row(
       children: [
@@ -752,11 +770,10 @@ int main() {
     );
   }
 
-  // 체크박스 스타일
   Widget _buildCheckbox(String label, bool value, String message, Function(bool?) onChanged) {
     return Tooltip(
-      message: message, // 표시할 설명 문구
-      waitDuration: const Duration(milliseconds: 500), // 마우스를 올리고 대기하는 시간
+      message: message,
+      waitDuration: const Duration(milliseconds: 500),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -767,12 +784,10 @@ int main() {
     );
   }
 
-
-  // 드롭다운 스타일 (그림자 및 테두리 문제 해결)
   Widget _buildCustomDropdown(String value, List<String> options, Function(String?) onChanged, {bool isSmall = false}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8),
-      height: 32, // 실제 화면에 보이는 버튼의 높이
+      height: 32,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(4),
         border: Border.all(color: Colors.grey[400]!),
@@ -781,17 +796,14 @@ int main() {
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
           value: value,
-          isDense: true, // 버튼 내부의 여백을 최소화하여 높이(32)에 맞게 압축
+          isDense: true,
           menuMaxHeight: 200, 
-          // [수정] itemHeight를 null로 설정하면 에러가 해결됩니다.
-          // 팝업 메뉴 아이템의 높이는 기본값(48)을 유지하면서 버튼 크기만 줄어듭니다.
           itemHeight: null, 
           style: TextStyle(fontSize: isSmall ? 11 : 12, color: Colors.black),
           focusColor: Colors.transparent,
           icon: const Icon(Icons.arrow_drop_down, size: 18),
           items: options.map<DropdownMenuItem<String>>((String o) => DropdownMenuItem<String>(
             value: o,
-            // 터치 영역(48) 안에서 텍스트가 중앙에 오도록 배치
             child: Text(o),
           )).toList(),
           onChanged: onChanged,
@@ -817,7 +829,7 @@ class RightPanel extends StatelessWidget {
     required this.onOpenFolder,
     required this.onRun,
     required this.onApplyPreset,
-    }); 
+  }); 
   
   @override
   Widget build(BuildContext context) {
@@ -833,7 +845,6 @@ class RightPanel extends StatelessWidget {
           const SizedBox(height: 10),
           _buildButton("Open Build Folder", onOpenFolder),
           const SizedBox(height: 30),
-          const SizedBox(height: 30),
           ElevatedButton(
             onPressed: onRun, 
             style: ElevatedButton.styleFrom(
@@ -841,11 +852,10 @@ class RightPanel extends StatelessWidget {
               foregroundColor: Colors.white,
               minimumSize: const Size(double.infinity, 40), 
             ),
-            child: Text("Run Project"),
+            child: const Text("Run Project"),
           ),
-          const SizedBox(height: 10),
-          const SizedBox(height: 10),
-          const Align(alignment: Alignment.centerLeft, child: Text("Preset Profiles")),
+          const SizedBox(height: 20),
+          const Align(alignment: Alignment.centerLeft, child: Text("Preset Profiles", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
           const SizedBox(height: 10),
 
           InkWell(
@@ -863,7 +873,7 @@ class RightPanel extends StatelessWidget {
                 children: [
                   Text("OpenGL Basic Template", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
                   SizedBox(height: 5),
-                  Text("GLFW + GLAD 기본 창 생성 코드", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  Text("Generates standard template window using GLFW + GLAD.", style: TextStyle(fontSize: 11, color: Colors.grey)),
                 ],
               ),
             ),
@@ -872,6 +882,7 @@ class RightPanel extends StatelessWidget {
       ),
     );
   }
+
   Widget _buildButton(String label, VoidCallback onPressed) {
     return ElevatedButton(
       onPressed: onPressed,
@@ -880,5 +891,3 @@ class RightPanel extends StatelessWidget {
     );
   }
 }
-
-
