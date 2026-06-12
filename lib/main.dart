@@ -79,48 +79,78 @@ class _LeftPanelState extends State<LeftPanel> {
   List<LogEntry> logs = []; 
 
   String selectedGenerator = "Visual Studio 17 2022";
-  List<String> generatorOptions = ["Visual Studio 17 2022", "Visual Studio 16 2019", "Ninja"];
+  List<String> generatorOptions = ["Visual Studio 17 2022", "Visual Studio 16 2019", "Ninja", "MinGW Makefiles", "MSYS Makefiles"];
   // 라이브러리 목록을 가져오는 함수
   List<String> getCachedLibraries() {
-    final projectName = projectNameController.text.trim();
-    final sourcePath = sourceController.text.trim();
-    
-    if (projectName.isEmpty || sourcePath.isEmpty) return [];
-
     final projectRoot = _getProjectRoot();
-    final extPath = p.join(projectRoot, 'external', 'gdm', 'external');
-    
-    final dir = Directory(extPath);
-    if (dir.existsSync()) {
-      return dir.listSync()
-          .whereType<Directory>()
-          .map((e) => p.basename(e.path))
-          .toList();
+    final externalDirs = <String>[];
+
+    // 1️. external 폴더 전체 확인
+    final extRoot = Directory(p.join(projectRoot, 'external'));
+    if (extRoot.existsSync()) {
+      for (var entity in extRoot.listSync().whereType<Directory>()) {
+        final dirName = p.basename(entity.path);
+
+        // 2. 만약 gdm/external 하위 폴더가 있으면 거기까지 포함
+        if (dirName == 'gdm') {
+          final gdmExt = Directory(p.join(entity.path, 'external'));
+          if (gdmExt.existsSync()) {
+            externalDirs.addAll(
+              gdmExt.listSync().whereType<Directory>().map((e) => p.basename(e.path))
+            );
+          }
+        } else {
+          externalDirs.add(dirName);
+        }
+      }
     }
-    return [];
+
+    return externalDirs;
   }
 
   static const String openGLTemplate = r'''
-#include <glad/gl.h>
-#include <GLFW/glfw3.h>
+//Instead including headers manually...
+//#include <glad/gl.h>
+//#include <GLFW/glfw3.h>
+//Just include glutil/gl.h!
+#include <glutil/gl.hpp>
+
 #include <iostream>
+#include <array>
+
+const char* vs = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aColor;
+out vec3 vColor;
+void main() {
+    gl_Position = vec4(aPos,1.0);
+    vColor = aColor;
+})";
+
+const char* fs = R"(
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor,1.0);
+})";
 
 int main() {
-    if (!glfwInit()) {
-        std::cout << "Failed to initialize GLFW" << std::endl;
-        return -1;
-    }
+    glfwInit();
 
-    GLFWwindow* window = glfwCreateWindow(800, 600, "GDM OpenGL Window", NULL, NULL);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    GLFWwindow* window = glfwCreateWindow(800, 600, "Hello, OpenGL!", nullptr, nullptr);
     if (!window) {
         std::cout << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
         return -1;
     }
-
     glfwMakeContextCurrent(window);
 
-    // GLAD2 방식
     int version = gladLoadGL(glfwGetProcAddress);
     if (version == 0) {
         std::cout << "Failed to initialize GLAD" << std::endl;
@@ -130,16 +160,59 @@ int main() {
     std::cout << "OpenGL loaded: " << GLAD_VERSION_MAJOR(version)
               << "." << GLAD_VERSION_MINOR(version) << std::endl;
 
+    std::array<float, 18> vtx = {
+        -0.5f,-0.5f,0, 1,0,0,
+         0.5f,-0.5f,0, 0,1,0,
+         0.0f, 0.5f,0, 0,0,1
+    };
+
+    GLuint vao, vbo;
+    glGenVertexArrays(1,&vao);
+    glGenBuffers(1,&vbo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER,vbo);
+    glBufferData(GL_ARRAY_BUFFER,sizeof(vtx),vtx.data(),GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    GLuint v = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(v, 1, &vs, nullptr);
+    glCompileShader(v);
+    
+    GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(f, 1, &fs, nullptr);
+    glCompileShader(f);
+
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+
+    glDeleteShader(v);
+    glDeleteShader(f);
+
     while (!glfwWindowShouldClose(window)) {
-        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+        glClearColor(0.1f,0.1f,0.2f,1);
         glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(p);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES,0,3);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
+    glDeleteProgram(p);
+    glDeleteBuffers(1,&vbo);
+    //glDeleteVertexArrays(1,&vao); //We intentionally introduced a resource leak, can you find it?
+
     glfwTerminate();
-    return 0;
 }
 ''';
 
@@ -170,18 +243,19 @@ int main() {
   Future<void> pickSourceFolder() async {
     String? path = await FilePicker.platform.getDirectoryPath();
 
-    if (path != null)   {
+    if (path != null) {
       setState(() {
-        sourceController.text = path;
-        
-
-        
-        if (projectNameController.text.isEmpty || projectNameController.text == "NewProject") {
-          projectNameController.text = p.basename(path);
+        if (projectNameController.text.isEmpty) {
+          projectNameController.text = "NewProject";
         }
-        
-        // 빌드 경로는  /build로 자동 설정
-        buildController.text = p.join(path, 'build');
+
+        final projectName = projectNameController.text.trim();
+
+        // 선택한 폴더 아래에 프로젝트 폴더를 Source로 설정
+        final sourceDir = p.join(path, projectName);
+
+        sourceController.text = sourceDir;
+        buildController.text = p.join(sourceDir, 'build');
       });
     }
   }
@@ -249,7 +323,7 @@ int main() {
 
           var result = await Process.run('git', [
             'clone',
-            '-b', 'gdm',
+            '-b', 'master',
             '--single-branch',
             '--depth', '1', // 최신 커밋 하나만 가져오기
             'https://github.com/awidesky/gdm.git',
@@ -273,7 +347,7 @@ int main() {
         final mainCpp = File(p.join(srcDir.path, 'main.cpp'));
         if (isNewProject || !await mainCpp.exists()) {
           addLog("기본 템플릿 소스를 생성합니다.");
-          await mainCpp.writeAsString(r'''
+          await mainCpp.writeAsString(enableOpenGL ? openGLTemplate : '''
   #include <iostream>
   int main() {
       std::cout << "Hello OpenGL Project!" << std::endl;
@@ -284,31 +358,48 @@ int main() {
 
       // CMakeLists.txt 생성
       String cmakeContent = '''
-  cmake_minimum_required(VERSION 3.10)
-  project($projectName)
+cmake_minimum_required(VERSION 3.10)
+project($projectName)
 
-  set(CMAKE_CXX_STANDARD 17)
-  add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
-  ''';
+set(CMAKE_CXX_STANDARD 17)
+add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
+''';
 
-      if (enableOpenGL) {
-        cmakeContent += '\n# OpenGL 관련 라이브러리 추가\n';
-        cmakeContent += 'add_subdirectory(external/gdm)\n';
-        cmakeContent += 'include_directories(external/gdm/include)\n';
-      }
+    if (enableOpenGL) {cmakeContent += '''
+# GDM 옵션
+set(GDM_USE_GLUTIL ON CACHE BOOL "" FORCE)
+set(GDM_BUILD_EXAMPLES ON CACHE BOOL "" FORCE)
 
-      cmakeContent += '''
-  if (MSVC)
-      add_compile_options(/utf-8 /Zc:__cplusplus)
-  endif()
+# 윈도우 생성 라이브러리(glfw, freeglut으로 변경 가능)
+set(GDM_WINDOW_BACKEND "glfw" CACHE STRING "" FORCE)
+set(GLFW_VERSION "3.4.0" CACHE STRING "" FORCE)
 
-  file(GLOB SOURCES "src/*.cpp")
-  add_executable($projectName \${SOURCES})
+# OpenGL 함수 로딩 라이브러리(glad, glew로 변경 가능)
+set(GDM_GL_LOADER "glad" CACHE STRING "" FORCE)
+set(GLAD_VERSION "2.0.8" CACHE STRING "" FORCE)
+
+# GLSL 수학 라이브러리(glm)
+set(GDM_USE_GLM ON CACHE BOOL "" FORCE)
+set(GLM_VERSION "1.0.1" CACHE STRING "" FORCE)
+
+# gdm이 옵션으로 설정한 의존성을 처리.
+add_subdirectory(external/gdm)
+''';
+    }
+
+    cmakeContent += '''
+file(GLOB SOURCES "src/*.cpp")
+add_executable($projectName \${SOURCES})
+
+if (MSVC)
+    add_compile_options(/utf-8 /Zc:__cplusplus)
+    set_property(DIRECTORY \${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT $projectName)
+endif()
   ''';
 
       //Auto Link Libraries 체크박스까지 켜져 있을 때만 링크 수행
       if (enableOpenGL && autoLink) {
-        cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm glfw)\n';
+        cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm::deps gdm::glutil)\n';
       }
 
       addLog("CMakeLists.txt 구성 중...");
@@ -318,7 +409,7 @@ int main() {
         addLog("오류 발생: $e");
       }
 
-      addLog("프로젝트 구성이 완료되었습니다. 이제 Generate와 Build를 진행하세요.");
+      addLog("프로젝트 구성이 완료되었습니다. 이제 Run CMake와 Build를 진행하세요.");
     } finally {
       setState(() => isLoading = false);
     }
@@ -444,18 +535,20 @@ int main() {
       addLog("CMake 구성을 시작합니다... (Generator: $selectedGenerator)");
       
       try {
-        final result = await Process.run('cmake', [
+        final process = await Process.start('cmake', [
           '-G', selectedGenerator,
           '-S', projectRoot, 
           '-B', buildPath
         ]);
 
-        addLog(result.stdout);
-        
-        if (result.exitCode != 0) {
-          addLog("에러: ${result.stderr}");
+        process.stdout.transform(utf8.decoder).listen((data) { addLog(data.trim()); });
+        process.stderr.transform(utf8.decoder).listen((data) { addLog("[ERROR] $data"); });
+
+        final code = await process.exitCode;
+        if (code != 0) {
+          addLog("에러: $code");
         } else {
-          addLog("CMake 구성(Generate) 완료!");
+          addLog("CMake 구성(Configure/Generate) 완료!");
         }
       } catch (e) {
         addLog("에러 발생: $e", isError: true);
@@ -825,9 +918,9 @@ class RightPanel extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
-          _buildButton("Configure", onConfigure),
+          _buildButton("Make Project", onConfigure),
           const SizedBox(height: 10),
-          _buildButton("Generate", onGenerate),
+          _buildButton("Run CMake", onGenerate),
           const SizedBox(height: 10),
           _buildButton("Build", onBuild),
           const SizedBox(height: 10),
