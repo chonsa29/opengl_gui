@@ -166,7 +166,32 @@ class _LeftPanelState extends State<LeftPanel> {
 //Just include glutil/gl.h!
 #include <glutil/gl.hpp>
 
+//Instead including headers manually...
+//#include <glad/gl.h>
+//#include <GLFW/glfw3.h>
+//Just include glutil/gl.h!
+#include <glutil/gl.hpp>
+
 #include <iostream>
+#include <array>
+
+const char* vs = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aColor;
+out vec3 vColor;
+void main() {
+    gl_Position = vec4(aPos,1.0);
+    vColor = aColor;
+})";
+
+const char* fs = R"(
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor,1.0);
+})";
 #include <array>
 
 const char* vs = R"(
@@ -193,7 +218,13 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwInit();
 
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    GLFWwindow* window = glfwCreateWindow(800, 600, "Hello, OpenGL!", nullptr, nullptr);
     GLFWwindow* window = glfwCreateWindow(800, 600, "Hello, OpenGL!", nullptr, nullptr);
     if (!window) {
         std::cout << "Failed to create GLFW window" << std::endl;
@@ -248,9 +279,50 @@ int main() {
     glDeleteShader(v);
     glDeleteShader(f);
 
+    std::array<float, 18> vtx = {
+        -0.5f,-0.5f,0, 1,0,0,
+         0.5f,-0.5f,0, 0,1,0,
+         0.0f, 0.5f,0, 0,0,1
+    };
+
+    GLuint vao, vbo;
+    glGenVertexArrays(1,&vao);
+    glGenBuffers(1,&vbo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER,vbo);
+    glBufferData(GL_ARRAY_BUFFER,sizeof(vtx),vtx.data(),GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    GLuint v = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(v, 1, &vs, nullptr);
+    glCompileShader(v);
+    
+    GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(f, 1, &fs, nullptr);
+    glCompileShader(f);
+
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+
+    glDeleteShader(v);
+    glDeleteShader(f);
+
     while (!glfwWindowShouldClose(window)) {
         glClearColor(0.1f,0.1f,0.2f,1);
+        glClearColor(0.1f,0.1f,0.2f,1);
         glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(p);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES,0,3);
 
         glUseProgram(p);
         glBindVertexArray(vao);
@@ -259,6 +331,10 @@ int main() {
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
+
+    glDeleteProgram(p);
+    glDeleteBuffers(1,&vbo);
+    //glDeleteVertexArrays(1,&vao); //We intentionally introduced a resource leak, can you find it?
 
     glDeleteProgram(p);
     glDeleteBuffers(1,&vbo);
@@ -393,6 +469,7 @@ int main() {
           // Fixed to pull from the default branch (master/main)
           var result = await Process.run('git', [
             'clone',
+            '-b', 'master',
             '-b', 'master',
             '--single-branch',
             '--depth', '1',
@@ -607,6 +684,7 @@ endif()
       addLog("Starting CMake configuration... (Generator: $selectedGenerator)");
       
       try {
+        final process = await Process.start('cmake', [
         final process = await Process.start('cmake', [
           '-G', selectedGenerator,
           '-S', projectRoot, 
@@ -999,7 +1077,9 @@ class RightPanel extends StatelessWidget {
       child: Column(
         children: [
           _buildButton("Make Project", onConfigure),
+          _buildButton("Make Project", onConfigure),
           const SizedBox(height: 10),
+          _buildButton("Run CMake", onGenerate),
           _buildButton("Run CMake", onGenerate),
           const SizedBox(height: 10),
           _buildButton("Build", onBuild),
