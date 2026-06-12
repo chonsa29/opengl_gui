@@ -83,78 +83,70 @@ class _LeftPanelState extends State<LeftPanel> {
 
   String selectedGenerator = "Visual Studio 17 2022";
   List<String> generatorOptions = ["Visual Studio 17 2022", "Visual Studio 16 2019", "Ninja"];
-
-  // 수정된 라이브러리 실시간 탐지 함수
+  // 라이브러리 목록을 가져오는 함수
   List<String> getCachedLibraries() {
     final projectName = projectNameController.text.trim();
     final sourcePath = sourceController.text.trim();
-    final buildPath = buildController.text.trim();
     
     if (projectName.isEmpty || sourcePath.isEmpty) return [];
 
-    // 중복 제거를 위해 Set 사용
-    final Set<String> detectedLibraries = {};
     final projectRoot = _getProjectRoot();
-
-    // 1. 소스 폴더 내 고정 external 경로 탐색 (glutil 등 감지)
     final extPath = p.join(projectRoot, 'external', 'gdm', 'external');
-    final extDir = Directory(extPath);
-    if (extDir.existsSync()) {
-      for (var entity in extDir.listSync().whereType<Directory>()) {
-        detectedLibraries.add(p.basename(entity.path));
-      }
+    
+    final dir = Directory(extPath);
+    if (dir.existsSync()) {
+      return dir.listSync()
+          .whereType<Directory>()
+          .map((e) => p.basename(e.path))
+          .toList();
     }
-
-    // 2. 빌드 폴더 내 CMake 의존성 다운로드 경로 탐색 (glfw, glad, glm 등 감지)
-    if (buildPath.isNotEmpty) {
-      // CMake FetchContent가 일반적으로 사용하는 경로 (_deps)
-      final depsPath = p.join(buildPath, '_deps');
-      final depsDir = Directory(depsPath);
-      if (depsDir.existsSync()) {
-        for (var entity in depsDir.listSync().whereType<Directory>()) {
-          String name = p.basename(entity.path);
-          // -src, -build, -subbuild 등으로 끝나는 접미사를 정리하여 깔끔하게 이름만 추출
-          name = name.replaceAll(RegExp(r'-(src|build|subbuild)$'), '');
-          detectedLibraries.add(name);
-        }
-      }
-      
-      // 혹시 다른 세부 하위 경로에 생성되는 경우 추가 체크
-      final gdmDepsPath = p.join(buildPath, '_gdm_deps');
-      final gdmDepsDir = Directory(gdmDepsPath);
-      if (gdmDepsDir.existsSync()) {
-        for (var entity in gdmDepsDir.listSync().whereType<Directory>()) {
-          String name = p.basename(entity.path);
-          name = name.replaceAll(RegExp(r'-(src|build|subbuild)$'), '');
-          detectedLibraries.add(name);
-        }
-      }
-    }
-
-    return detectedLibraries.toList();
+    return [];
   }
   
   static const String openGLTemplate = r'''
-#include <glad/gl.h>
-#include <GLFW/glfw3.h>
+//Instead including headers manually...
+//#include <glad/gl.h>
+//#include <GLFW/glfw3.h>
+//Just include glutil/gl.h!
+#include <glutil/gl.hpp>
+
 #include <iostream>
+#include <array>
+
+const char* vs = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aColor;
+out vec3 vColor;
+void main() {
+    gl_Position = vec4(aPos,1.0);
+    vColor = aColor;
+})";
+
+const char* fs = R"(
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor,1.0);
+})";
 
 int main() {
-    if (!glfwInit()) {
-        std::cout << "Failed to initialize GLFW" << std::endl;
-        return -1;
-    }
+    glfwInit();
 
-    GLFWwindow* window = glfwCreateWindow(800, 600, "GDM OpenGL Window", NULL, NULL);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    GLFWwindow* window = glfwCreateWindow(800, 600, "Hello, OpenGL!", nullptr, nullptr);
     if (!window) {
         std::cout << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
         return -1;
     }
-
     glfwMakeContextCurrent(window);
 
-    // GLAD2 Method
+    // GLAD2 방식
     int version = gladLoadGL(glfwGetProcAddress);
     if (version == 0) {
         std::cout << "Failed to initialize GLAD" << std::endl;
@@ -164,16 +156,59 @@ int main() {
     std::cout << "OpenGL loaded: " << GLAD_VERSION_MAJOR(version)
               << "." << GLAD_VERSION_MINOR(version) << std::endl;
 
+    std::array<float, 18> vtx = {
+        -0.5f,-0.5f,0, 1,0,0,
+         0.5f,-0.5f,0, 0,1,0,
+         0.0f, 0.5f,0, 0,0,1
+    };
+
+    GLuint vao, vbo;
+    glGenVertexArrays(1,&vao);
+    glGenBuffers(1,&vbo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER,vbo);
+    glBufferData(GL_ARRAY_BUFFER,sizeof(vtx),vtx.data(),GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    GLuint v = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(v, 1, &vs, nullptr);
+    glCompileShader(v);
+    
+    GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(f, 1, &fs, nullptr);
+    glCompileShader(f);
+
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+
+    glDeleteShader(v);
+    glDeleteShader(f);
+
     while (!glfwWindowShouldClose(window)) {
-        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+        glClearColor(0.1f,0.1f,0.2f,1);
         glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(p);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES,0,3);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
+    glDeleteProgram(p);
+    glDeleteBuffers(1,&vbo);
+    //glDeleteVertexArrays(1,&vao); //We intentionally introduced a resource leak, can you find it?
+
     glfwTerminate();
-    return 0;
 }
 ''';
 
@@ -221,11 +256,13 @@ int main() {
       setState(() {
         sourceController.text = path;
         
+
+        
         if (projectNameController.text.isEmpty || projectNameController.text == "NewProject") {
           projectNameController.text = p.basename(path);
         }
         
-        // Auto-set build directory to /build
+        // 빌드 경로는  /build로 자동 설정
         buildController.text = p.join(path, 'build');
       });
     }
@@ -290,6 +327,7 @@ int main() {
           // Fixed to pull from the default branch (master/main)
           var result = await Process.run('git', [
             'clone',
+            '-b', 'gdm',
             '--single-branch',
             '--depth', '1',
             'https://github.com/awidesky/gdm.git',
@@ -311,43 +349,44 @@ int main() {
         // Generate main.cpp
         final mainCpp = File(p.join(srcDir.path, 'main.cpp'));
         if (isNewProject || !await mainCpp.exists()) {
-          addLog("Generating default template source.");
+          addLog("기본 템플릿 소스를 생성합니다.");
           await mainCpp.writeAsString(r'''
-#include <iostream>
-int main() {
-    std::cout << "Hello OpenGL Project!" << std::endl;
-    return 0;
-}
-''');
+  #include <iostream>
+  int main() {
+      std::cout << "Hello OpenGL Project!" << std::endl;
+      return 0;
+  }
+  ''');
         }
 
-        // Generate CMakeLists.txt
-        String cmakeContent = '''
-cmake_minimum_required(VERSION 3.10)
-project($projectName)
+      // CMakeLists.txt 생성
+      String cmakeContent = '''
+  cmake_minimum_required(VERSION 3.10)
+  project($projectName)
 
 set(CMAKE_CXX_STANDARD 17)
 add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
 ''';
 
-        if (enableOpenGL) {
-          cmakeContent += '\n# Add OpenGL related libraries\n';
-          cmakeContent += 'add_subdirectory(external/gdm)\n';
-          cmakeContent += 'include_directories(external/gdm/include)\n';
-        }
+      if (enableOpenGL) {
+        cmakeContent += '\n# OpenGL 관련 라이브러리 추가\n';
+        cmakeContent += 'add_subdirectory(external/gdm)\n';
+        cmakeContent += 'include_directories(external/gdm/include)\n';
+      }
 
-        cmakeContent += '''
-if (MSVC)
-    add_compile_options(/utf-8 /Zc:__cplusplus)
-endif()
+      cmakeContent += '''
+  if (MSVC)
+      add_compile_options(/utf-8 /Zc:__cplusplus)
+  endif()
 
-file(GLOB SOURCES "src/*.cpp")
-add_executable($projectName \${SOURCES})
-''';
+  file(GLOB SOURCES "src/*.cpp")
+  add_executable($projectName \${SOURCES})
+  ''';
 
-        if (enableOpenGL && autoLink) {
-          cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm glfw)\n';
-        }
+      //Auto Link Libraries 체크박스까지 켜져 있을 때만 링크 수행
+      if (enableOpenGL && autoLink) {
+        cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm glfw)\n';
+      }
 
         addLog("Configuring CMakeLists.txt...");
         final cmakeFile = File(p.join(projectRoot, 'CMakeLists.txt'));
@@ -356,7 +395,7 @@ add_executable($projectName \${SOURCES})
         addLog("An error occurred: $e", isError: true);
       }
 
-      addLog("Project configuration completed. You can now proceed to Generate and Build.");
+      addLog("프로젝트 구성이 완료되었습니다. 이제 Generate와 Build를 진행하세요.");
     } finally {
       setState(() => isLoading = false);
     }
@@ -453,18 +492,18 @@ add_executable($projectName \${SOURCES})
       addLog("Starting CMake configuration... (Generator: $selectedGenerator)");
       
       try {
-        final result = await Process.run('cmake', [
+        final process = await Process.start('cmake', [
           '-G', selectedGenerator,
           '-S', projectRoot, 
           '-B', buildPath
         ]);
 
-        if (result.stdout.toString().isNotEmpty) addLog(result.stdout);
+        addLog(result.stdout);
         
         if (result.exitCode != 0) {
-          addLog("Error: ${result.stderr}", isError: true);
+          addLog("에러: ${result.stderr}");
         } else {
-          addLog("CMake configuration (Generate) completed successfully!");
+          addLog("CMake 구성(Generate) 완료!");
         }
       } catch (e) {
         addLog("Error occurred: $e", isError: true);
@@ -837,9 +876,9 @@ class RightPanel extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
-          _buildButton("Configure", onConfigure),
+          _buildButton("Make Project", onConfigure),
           const SizedBox(height: 10),
-          _buildButton("Generate", onGenerate),
+          _buildButton("Run CMake", onGenerate),
           const SizedBox(height: 10),
           _buildButton("Build", onBuild),
           const SizedBox(height: 10),
