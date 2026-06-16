@@ -83,24 +83,80 @@ class _LeftPanelState extends State<LeftPanel> {
 
   String selectedGenerator = "Visual Studio 17 2022";
   List<String> generatorOptions = ["Visual Studio 17 2022", "Visual Studio 16 2019", "Ninja"];
+
+  // 수정된 라이브러리 실시간 탐지 함수
+  List<String> generatorOptions = ["Visual Studio 17 2022", "Visual Studio 16 2019", "Ninja", "MinGW Makefiles", "MSYS Makefiles"];
   // 라이브러리 목록을 가져오는 함수
   List<String> getCachedLibraries() {
     final projectName = projectNameController.text.trim();
     final sourcePath = sourceController.text.trim();
+    final buildPath = buildController.text.trim();
     
     if (projectName.isEmpty || sourcePath.isEmpty) return [];
 
+    // 중복 제거를 위해 Set 사용
+    final Set<String> detectedLibraries = {};
     final projectRoot = _getProjectRoot();
+
+    // 1. 소스 폴더 내 고정 external 경로 탐색 (glutil 등 감지)
     final extPath = p.join(projectRoot, 'external', 'gdm', 'external');
-    
-    final dir = Directory(extPath);
-    if (dir.existsSync()) {
-      return dir.listSync()
-          .whereType<Directory>()
-          .map((e) => p.basename(e.path))
-          .toList();
+    final extDir = Directory(extPath);
+    if (extDir.existsSync()) {
+      for (var entity in extDir.listSync().whereType<Directory>()) {
+        detectedLibraries.add(p.basename(entity.path));
+      }
     }
-    return [];
+
+    // 2. 빌드 폴더 내 CMake 의존성 다운로드 경로 탐색 (glfw, glad, glm 등 감지)
+    if (buildPath.isNotEmpty) {
+      // CMake FetchContent가 일반적으로 사용하는 경로 (_deps)
+      final depsPath = p.join(buildPath, '_deps');
+      final depsDir = Directory(depsPath);
+      if (depsDir.existsSync()) {
+        for (var entity in depsDir.listSync().whereType<Directory>()) {
+          String name = p.basename(entity.path);
+          // -src, -build, -subbuild 등으로 끝나는 접미사를 정리하여 깔끔하게 이름만 추출
+          name = name.replaceAll(RegExp(r'-(src|build|subbuild)$'), '');
+          detectedLibraries.add(name);
+        }
+      }
+      
+      // 혹시 다른 세부 하위 경로에 생성되는 경우 추가 체크
+      final gdmDepsPath = p.join(buildPath, '_gdm_deps');
+      final gdmDepsDir = Directory(gdmDepsPath);
+      if (gdmDepsDir.existsSync()) {
+        for (var entity in gdmDepsDir.listSync().whereType<Directory>()) {
+          String name = p.basename(entity.path);
+          name = name.replaceAll(RegExp(r'-(src|build|subbuild)$'), '');
+          detectedLibraries.add(name);
+        }
+      }
+    }
+
+    return detectedLibraries.toList();
+    final externalDirs = <String>[];
+
+    // 1️. external 폴더 전체 확인
+    final extRoot = Directory(p.join(projectRoot, 'external'));
+    if (extRoot.existsSync()) {
+      for (var entity in extRoot.listSync().whereType<Directory>()) {
+        final dirName = p.basename(entity.path);
+
+        // 2. 만약 gdm/external 하위 폴더가 있으면 거기까지 포함
+        if (dirName == 'gdm') {
+          final gdmExt = Directory(p.join(entity.path, 'external'));
+          if (gdmExt.existsSync()) {
+            externalDirs.addAll(
+              gdmExt.listSync().whereType<Directory>().map((e) => p.basename(e.path))
+            );
+          }
+        } else {
+          externalDirs.add(dirName);
+        }
+      }
+    }
+
+    return externalDirs;
   }
   
   static const String openGLTemplate = r'''
@@ -146,7 +202,7 @@ int main() {
     }
     glfwMakeContextCurrent(window);
 
-    // GLAD2 방식
+    // GLAD2 Method
     int version = gladLoadGL(glfwGetProcAddress);
     if (version == 0) {
         std::cout << "Failed to initialize GLAD" << std::endl;
@@ -253,17 +309,27 @@ int main() {
     String? path = await FilePicker.platform.getDirectoryPath();
 
     if (path != null) {
+    if (path != null) {
       setState(() {
         sourceController.text = path;
-        
-
         
         if (projectNameController.text.isEmpty || projectNameController.text == "NewProject") {
           projectNameController.text = p.basename(path);
         }
         
-        // 빌드 경로는  /build로 자동 설정
+        // Auto-set build directory to /build
         buildController.text = p.join(path, 'build');
+        if (projectNameController.text.isEmpty) {
+          projectNameController.text = "NewProject";
+        }
+
+        final projectName = projectNameController.text.trim();
+
+        // 선택한 폴더 아래에 프로젝트 폴더를 Source로 설정
+        final sourceDir = p.join(path, projectName);
+
+        sourceController.text = sourceDir;
+        buildController.text = p.join(sourceDir, 'build');
       });
     }
   }
@@ -327,7 +393,7 @@ int main() {
           // Fixed to pull from the default branch (master/main)
           var result = await Process.run('git', [
             'clone',
-            '-b', 'gdm',
+            '-b', 'master',
             '--single-branch',
             '--depth', '1',
             'https://github.com/awidesky/gdm.git',
@@ -350,42 +416,90 @@ int main() {
         final mainCpp = File(p.join(srcDir.path, 'main.cpp'));
         if (isNewProject || !await mainCpp.exists()) {
           addLog("기본 템플릿 소스를 생성합니다.");
-          await mainCpp.writeAsString(r'''
+          await mainCpp.writeAsString(enableOpenGL ? openGLTemplate : '''
   #include <iostream>
   int main() {
       std::cout << "Hello OpenGL Project!" << std::endl;
       return 0;
   }
   ''');
+          addLog("Generating default template source.");
+          await mainCpp.writeAsString(r'''
+#include <iostream>
+int main() {
+    std::cout << "Hello OpenGL Project!" << std::endl;
+    return 0;
+}
+''');
         }
 
       // CMakeLists.txt 생성
       String cmakeContent = '''
-  cmake_minimum_required(VERSION 3.10)
-  project($projectName)
+cmake_minimum_required(VERSION 3.10)
+project($projectName)
+        // Generate CMakeLists.txt
+        String cmakeContent = '''
+cmake_minimum_required(VERSION 3.10)
+project($projectName)
 
 set(CMAKE_CXX_STANDARD 17)
 add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
 ''';
+set(CMAKE_CXX_STANDARD 17)
+add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
+''';
 
-      if (enableOpenGL) {
-        cmakeContent += '\n# OpenGL 관련 라이브러리 추가\n';
-        cmakeContent += 'add_subdirectory(external/gdm)\n';
-        cmakeContent += 'include_directories(external/gdm/include)\n';
-      }
+    if (enableOpenGL) {cmakeContent += '''
+# GDM 옵션
+set(GDM_USE_GLUTIL ON CACHE BOOL "" FORCE)
+set(GDM_BUILD_EXAMPLES ON CACHE BOOL "" FORCE)
 
-      cmakeContent += '''
-  if (MSVC)
-      add_compile_options(/utf-8 /Zc:__cplusplus)
-  endif()
+# 윈도우 생성 라이브러리(glfw, freeglut으로 변경 가능)
+set(GDM_WINDOW_BACKEND "glfw" CACHE STRING "" FORCE)
+set(GLFW_VERSION "3.4.0" CACHE STRING "" FORCE)
 
-  file(GLOB SOURCES "src/*.cpp")
-  add_executable($projectName \${SOURCES})
+# OpenGL 함수 로딩 라이브러리(glad, glew로 변경 가능)
+set(GDM_GL_LOADER "glad" CACHE STRING "" FORCE)
+set(GLAD_VERSION "2.0.8" CACHE STRING "" FORCE)
+
+# GLSL 수학 라이브러리(glm)
+set(GDM_USE_GLM ON CACHE BOOL "" FORCE)
+set(GLM_VERSION "1.0.1" CACHE STRING "" FORCE)
+
+# gdm이 옵션으로 설정한 의존성을 처리.
+add_subdirectory(external/gdm)
+''';
+    }
+        if (enableOpenGL) {
+          cmakeContent += '\n# Add OpenGL related libraries\n';
+          cmakeContent += 'add_subdirectory(external/gdm)\n';
+          cmakeContent += 'include_directories(external/gdm/include)\n';
+        }
+
+        cmakeContent += '''
+if (MSVC)
+    add_compile_options(/utf-8 /Zc:__cplusplus)
+endif()
+
+file(GLOB SOURCES "src/*.cpp")
+add_executable($projectName \${SOURCES})
+''';
+    cmakeContent += '''
+file(GLOB SOURCES "src/*.cpp")
+add_executable($projectName \${SOURCES})
+
+if (MSVC)
+    add_compile_options(/utf-8 /Zc:__cplusplus)
+    set_property(DIRECTORY \${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT $projectName)
+endif()
   ''';
 
+        if (enableOpenGL && autoLink) {
+          cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm glfw)\n';
+        }
       //Auto Link Libraries 체크박스까지 켜져 있을 때만 링크 수행
       if (enableOpenGL && autoLink) {
-        cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm glfw)\n';
+        cmakeContent += '\ntarget_link_libraries($projectName PRIVATE gdm::deps gdm::glutil)\n';
       }
 
         addLog("Configuring CMakeLists.txt...");
@@ -395,7 +509,8 @@ add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
         addLog("An error occurred: $e", isError: true);
       }
 
-      addLog("프로젝트 구성이 완료되었습니다. 이제 Generate와 Build를 진행하세요.");
+      addLog("Project configuration completed. You can now proceed to Generate and Build.");
+      addLog("프로젝트 구성이 완료되었습니다. 이제 Run CMake와 Build를 진행하세요.");
     } finally {
       setState(() => isLoading = false);
     }
@@ -498,12 +613,19 @@ add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
           '-B', buildPath
         ]);
 
-        addLog(result.stdout);
+        if (result.stdout.toString().isNotEmpty) addLog(result.stdout);
         
         if (result.exitCode != 0) {
-          addLog("에러: ${result.stderr}");
+          addLog("Error: ${result.stderr}", isError: true);
+        process.stdout.transform(utf8.decoder).listen((data) { addLog(data.trim()); });
+        process.stderr.transform(utf8.decoder).listen((data) { addLog("[ERROR] $data"); });
+
+        final code = await process.exitCode;
+        if (code != 0) {
+          addLog("에러: $code");
         } else {
-          addLog("CMake 구성(Generate) 완료!");
+          addLog("CMake configuration (Generate) completed successfully!");
+          addLog("CMake 구성(Configure/Generate) 완료!");
         }
       } catch (e) {
         addLog("Error occurred: $e", isError: true);
