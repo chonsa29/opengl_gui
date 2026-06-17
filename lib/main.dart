@@ -53,7 +53,32 @@ class LogEntry {
   final bool isError;
   LogEntry(this.message, {this.isError = false});
 }
+class ProcessLogParser {
+  final bool isError;
+  final StringBuffer _buffer = StringBuffer();
 
+  ProcessLogParser({this.isError = false});
+
+  void feed(List<int> data, void Function(String, {bool isError}) onLog) {
+    _buffer.write(utf8.decode(data, allowMalformed: true));
+
+    String content = _buffer.toString();
+
+    int index;
+    while ((index = content.indexOf('\n')) != -1) {
+      final line = content.substring(0, index);
+      content = content.substring(index + 1);
+
+      if (line.trim().isNotEmpty) {
+        onLog(line.trimRight(), isError: isError);
+      }
+    }
+
+    _buffer
+      ..clear()
+      ..write(content);
+  }
+}
 class LeftPanel extends StatefulWidget {
   const LeftPanel({super.key});
 
@@ -78,8 +103,28 @@ class _LeftPanelState extends State<LeftPanel> {
   final ScrollController _scrollController = ScrollController();
   List<LogEntry> logs = []; 
 
-  String selectedGenerator = "Visual Studio 17 2022";
-  List<String> generatorOptions = ["Visual Studio 17 2022", "Visual Studio 16 2019", "Ninja", "MinGW Makefiles", "MSYS Makefiles"];
+  String selectedGenerator = "";
+  List<String> getCmakeGenerators() {
+    try {
+      final result = Process.runSync('cmake', ['-E', 'capabilities']);
+      if (result.exitCode != 0) throw Exception('cmake failed');
+
+      final json = jsonDecode(result.stdout as String);
+      final gens = json['generators'] as List<dynamic>;
+
+      final list = gens.where((g) {
+        if (g['platformSupport'] == false) return false;
+        return true;
+      }).map((g) => g['name'] as String).toList();
+
+      if (list.isEmpty) throw Exception('empty generator list');
+      
+      return list;
+    } catch (e) {
+      // fallback (최소 보장 리스트)
+      return ['Visual Studio 17 2022', 'Visual Studio 16 2019', 'Ninja', 'MinGW Makefiles', 'MSYS Makefiles' ];
+    }
+  }
   // 라이브러리 목록을 가져오는 함수
   List<String> getCachedLibraries() {
     final projectRoot = _getProjectRoot();
@@ -112,7 +157,7 @@ class _LeftPanelState extends State<LeftPanel> {
 //Instead including headers manually...
 //#include <glad/gl.h>
 //#include <GLFW/glfw3.h>
-//Just include glutil/gl.h!
+//Just include glutil/gl.hpp!
 #include <glutil/gl.hpp>
 
 #include <iostream>
@@ -280,17 +325,11 @@ int main() {
       final buildPath = buildController.text.trim();
 
       if (projectName.isEmpty || sourcePath.isEmpty || buildPath.isEmpty) {
-        addLog("Error: 모든 값을 입력하세요.");
+        addLog("Error: 모든 값을 입력하세요.", isError: true);
         return;
       }
 
-      String projectRoot;
-      if (p.basename(sourcePath) == projectName) {
-        projectRoot = sourcePath;
-      } else {
-        projectRoot = p.join(sourcePath, projectName);
-      }
-
+      String projectRoot = sourcePath;
       final projectDir = Directory(projectRoot);
 
       try {
@@ -331,7 +370,7 @@ int main() {
           ]);
 
           if (result.exitCode != 0) {
-            addLog("Git Clone 실패: ${result.stderr}");
+            addLog("Git Clone 실패: ${result.stderr}", isError: true);
             return;
           }
 
@@ -362,28 +401,29 @@ cmake_minimum_required(VERSION 3.10)
 project($projectName)
 
 set(CMAKE_CXX_STANDARD 17)
-add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
+
 ''';
 
     if (enableOpenGL) {cmakeContent += '''
-# GDM 옵션
+# GDM Options
 set(GDM_USE_GLUTIL ON CACHE BOOL "" FORCE)
 set(GDM_BUILD_EXAMPLES ON CACHE BOOL "" FORCE)
 
-# 윈도우 생성 라이브러리(glfw, freeglut으로 변경 가능)
+# Window backend library(glfw, freeglut supported)
 set(GDM_WINDOW_BACKEND "glfw" CACHE STRING "" FORCE)
 set(GLFW_VERSION "3.4.0" CACHE STRING "" FORCE)
 
-# OpenGL 함수 로딩 라이브러리(glad, glew로 변경 가능)
+# OpenGL function loading library(glad, glew supported)
 set(GDM_GL_LOADER "glad" CACHE STRING "" FORCE)
 set(GLAD_VERSION "2.0.8" CACHE STRING "" FORCE)
 
-# GLSL 수학 라이브러리(glm)
+# GLSL math library(glm)
 set(GDM_USE_GLM ON CACHE BOOL "" FORCE)
 set(GLM_VERSION "1.0.1" CACHE STRING "" FORCE)
 
-# gdm이 옵션으로 설정한 의존성을 처리.
+# Make GDM find/download and link libraries 
 add_subdirectory(external/gdm)
+
 ''';
     }
 
@@ -406,7 +446,7 @@ endif()
       final cmakeFile = File(p.join(projectRoot, 'CMakeLists.txt'));
       await cmakeFile.writeAsString(cmakeContent.trim());
       } catch (e) {
-        addLog("오류 발생: $e");
+        addLog("오류 발생: $e", isError: true);
       }
 
       addLog("프로젝트 구성이 완료되었습니다. 이제 Run CMake와 Build를 진행하세요.");
@@ -417,23 +457,8 @@ endif()
 
   //로그 추가 함수
   void addLog(String message, {bool isError = false}) {
-    bool errorFlag = isError;
-
-    if (!errorFlag) {
-      String lowerMsg = message.toLowerCase();
-  
-      bool hasErrorKeyword = lowerMsg.contains("error") || lowerMsg.contains("failed");
-    
-      bool isCmakeCheck = lowerMsg.contains("-- performing test") || 
-                          lowerMsg.contains("-- looking for");
-
-      if (hasErrorKeyword && !isCmakeCheck) {
-        errorFlag = true;
-      }
-    }
-
     setState(() {
-      logs.add(LogEntry(message, isError: errorFlag));
+      logs.add(LogEntry(message.trim(), isError: isError));
     });
     
     // 자동 스크롤 로직
@@ -442,34 +467,6 @@ endif()
         _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
       }
     });
-  }
-
-
-  //CMake 실행 함수
-  Future<void> runCMake(String projectPath, String buildPath) async {
-    try {
-      addLog("CMake 실행 시작");
-
-      var result1 = await Process.run(
-        'cmake',
-        ['-S', projectPath, '-B', buildPath],
-      );
-
-      addLog(result1.stdout);
-      addLog(result1.stderr);
-
-      var result2 = await Process.run(
-        'cmake',
-        ['--build', buildPath, '--config', 'Debug'],
-      );
-
-      addLog(result2.stdout);
-      addLog(result2.stderr);
-
-      addLog("빌드 완료!");
-    } catch (e) {
-      addLog("에러 발생: $e");
-    }
   }
 
   // 프로젝트 실행
@@ -486,19 +483,17 @@ endif()
           [],
           workingDirectory: p.dirname(exePath),
         );
-        process.stdout.transform(utf8.decoder).listen((data) {
-          addLog(data.trim());
-        });
-        process.stderr.transform(utf8.decoder).listen((data) {
-          addLog("[ERROR] ${data.trim()}");
-        });
+        final stdoutParser = ProcessLogParser();
+        final stderrParser = ProcessLogParser(isError: true);
+        process.stdout.listen((data) { stdoutParser.feed(data, addLog); });
+        process.stderr.listen((data) { stderrParser.feed(data, addLog); });
         // 프로세스 종료 감지
         process.exitCode.then((code) {
           addLog("--- 프로세스 종료 (Exit Code: $code) ---");
         });
 
       } catch (e) {
-        addLog("실행 중 심각한 오류 발생: $e");
+        addLog("실행 중 심각한 오류 발생: $e", isError: true);
       }
     } else {
       addLog("에러: $selectedConfig 모드로 빌드된 실행 파일을 찾을 수 없습니다.", isError: true);
@@ -509,7 +504,6 @@ endif()
   Future<void> runCMakeGenerate() async { 
     setState(() => isLoading = true);
     try{
-      final sourcePath = sourceController.text.trim();
       final buildPath = buildController.text.trim();
 
       if (buildPath.isEmpty) return;
@@ -541,12 +535,14 @@ endif()
           '-B', buildPath
         ]);
 
-        process.stdout.transform(utf8.decoder).listen((data) { addLog(data.trim()); });
-        process.stderr.transform(utf8.decoder).listen((data) { addLog("[ERROR] $data"); });
+        final stdoutParser = ProcessLogParser();
+        final stderrParser = ProcessLogParser(isError: true);
+        process.stdout.listen((data) { stdoutParser.feed(data, addLog); });
+        process.stderr.listen((data) { stderrParser.feed(data, addLog); });
 
         final code = await process.exitCode;
         if (code != 0) {
-          addLog("에러: $code");
+          addLog("에러: $code", isError: true);
         } else {
           addLog("CMake 구성(Configure/Generate) 완료!");
         }
@@ -563,21 +559,22 @@ endif()
     setState(() => isLoading = true);
     try{
       final projectName = projectNameController.text.trim();
-      final projectRoot = _getProjectRoot();
       final buildPath = buildController.text.trim();
       
       if (buildPath.isEmpty) return;
 
       addLog("빌드를 시작합니다... (Mode: $selectedConfig)");
-      final result = await Process.run('cmake', ['--build', buildPath, '--config', selectedConfig]);
-      addLog(result.stdout);
+      final result = await Process.start('cmake', ['--build', buildPath, '--config', selectedConfig, '--target', projectName]);
+      
+      final stdoutParser = ProcessLogParser();
+      final stderrParser = ProcessLogParser(isError: true);
+      result.stdout.listen((data) { stdoutParser.feed(data, addLog); });
+      result.stderr.listen((data) { stderrParser.feed(data, addLog); });
 
-      if (result.exitCode == 0) {
-        addLog("빌드 성공! 의존성 파일(DLL) 확인 중...");
-        await _deployDependencies(projectRoot, buildPath, projectName);
+      if (await result.exitCode == 0) {
         addLog("빌드 및 환경 구성 완료!");
       } else {
-        addLog("빌드 실패: ${result.stderr}");
+        addLog("빌드 실패: ${result.stderr}", isError: true);
       }
     }finally {
       setState(() => isLoading = false);
@@ -595,26 +592,6 @@ endif()
     }
   }
   
-  Future<void> _deployDependencies(String projectRoot, String buildPath, String projectName) async {
-    final targetDir = Directory(p.join(buildPath, 'Debug'));
-    if (!await targetDir.exists()) return;
-
-    
-    final List<String> dllSources = [
-      p.join(buildPath, '_deps', 'glfw3-build', 'src', 'Debug', 'glfw3.dll'),
-      p.join(buildPath, 'external', 'gdm', 'external', 'glfw3-3.4.0', 'src', 'Debug', 'glfw3.dll'),
-    ];
-
-    for (String sourcePath in dllSources) {
-      final sourceFile = File(sourcePath);
-      if (await sourceFile.exists()) {
-        final fileName = p.basename(sourcePath);
-        await sourceFile.copy(p.join(targetDir.path, fileName));
-        addLog("의존성 복사 완료: $fileName");
-      }
-    }
-  }
-
   //빌드 폴더 열기 기능
   Future<void> openBuildFolder() async {
     final buildPath = buildController.text.trim();
@@ -623,7 +600,7 @@ endif()
     if (await Directory(buildPath).exists()) {
       await Process.run('explorer.exe', [buildPath]);
     } else {
-      addLog("에러: 빌드 폴더가 존재하지 않습니다.");
+      addLog("에러: 빌드 폴더가 존재하지 않습니다.", isError: true);
     }
   }
 
@@ -650,7 +627,7 @@ endif()
         await mainCpp.writeAsString(openGLTemplate);
         addLog("성공: OpenGL 기본 템플릿이 적용되었습니다. 다시 Build 해주세요.");
       } catch (e) {
-        addLog("에러: 프리셋 적용 중 오류 발생 - $e");
+        addLog("에러: 프리셋 적용 중 오류 발생 - $e", isError: true);
       }
     }
   }
@@ -675,6 +652,8 @@ endif()
   //위젯
   @override
   Widget build(BuildContext context) {
+    List<String> generatorOptions = getCmakeGenerators();
+    selectedGenerator = generatorOptions[0];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
